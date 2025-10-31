@@ -72,6 +72,25 @@ type bqField struct {
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
+	// Required context env vars
+	taskID := os.Getenv("TASK_ID")
+	if taskID == "" {
+		logger.Error("TASK_ID is required")
+		os.Exit(1)
+	}
+
+	dagID := os.Getenv("DAG_ID")
+	if dagID == "" {
+		logger.Error("DAG_ID is required")
+		os.Exit(1)
+	}
+
+	// Re-instantiate logger with task/dag context
+	logger = slog.New(slog.NewTextHandler(os.Stdout, nil)).With(
+		"task-id", taskID,
+		"dag-id", dagID,
+	)
+
 	mountPath := os.Getenv("MOUNT_PATH")
 	if mountPath == "" {
 		logger.Error("MOUNT_PATH env var is required")
@@ -101,6 +120,10 @@ func main() {
 		logger.Error("BUCKET env var is required")
 		os.Exit(1)
 	}
+
+	deleteInFile := strings.EqualFold(os.Getenv("DELETE_IN_FILE"), "true")
+
+	makeColumnNamesSqlFriendly := strings.EqualFold(os.Getenv("MAKE_COLUMN_NAMES_SQL_FRIENDLY"), "true")
 
 	removeValuesEnv := os.Getenv("REMOVE_VALUES")
 	removeValues := strings.Split(removeValuesEnv, ",")
@@ -146,21 +169,23 @@ func main() {
 
 	outFileWriter := csv.NewWriter(gcsWriter)
 
-	columnNames, err := inFileReader.Read()
+	originalColumnNames, err := inFileReader.Read()
 	if err != nil {
 		logger.Error("Failed to read infile", "error", err)
 		os.Exit(1)
 	}
 
-	// Normalize column names to be SQL-friendly (for output header)
-	normalizedColumnNames := make([]string, len(columnNames))
-	for i := range columnNames {
-		normalizedColumnNames[i] = makeStringSqlFriendly(columnNames[i])
+	columnNames := originalColumnNames
+
+	if makeColumnNamesSqlFriendly {
+		for i := range originalColumnNames {
+			columnNames[i] = makeStringSqlFriendly(originalColumnNames[i])
+		}
 	}
 
-	logger.Info("Column names", "columnNames", normalizedColumnNames)
+	logger.Info("Column names", "columnNames", columnNames)
 
-	outFileWriter.Write(normalizedColumnNames)
+	outFileWriter.Write(columnNames)
 	outFileWriter.Flush()
 
 	err = outFileWriter.Error()
@@ -179,7 +204,7 @@ func main() {
 		isBool  bool
 	}
 
-	colCandidates := make([]candidate, len(normalizedColumnNames))
+	colCandidates := make([]candidate, len(columnNames))
 	for i := range colCandidates {
 		colCandidates[i] = candidate{
 			isInt:   true,
@@ -245,7 +270,7 @@ func main() {
 	}
 
 	// Determine final BigQuery types with a reasonable precedence (no date/time)
-	finalTypes := make([]string, len(normalizedColumnNames))
+	finalTypes := make([]string, len(columnNames))
 	for i, c := range colCandidates {
 		// Prefer numeric, then bool, else string
 		switch {
@@ -261,8 +286,8 @@ func main() {
 	}
 
 	// Build BigQuery schema JSON (array of fields)
-	schema := make([]bqField, 0, len(normalizedColumnNames))
-	for i, name := range normalizedColumnNames {
+	schema := make([]bqField, 0, len(columnNames))
+	for i, name := range columnNames {
 		fieldType := finalTypes[i]
 		if fieldType == "" {
 			fieldType = "STRING"
@@ -291,4 +316,12 @@ func main() {
 
 	logger.Info("CSV and schema written", "bucket", bucketName, "csvObject", outObjectPath, "schemaObject", schemaObjectPath)
 
+	if deleteInFile {
+		err = os.Remove(infilePath)
+		if err != nil && !os.IsNotExist(err) {
+			logger.Error("Failed to delete infile", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("Deleted infile", "file", infilePath)
+	}
 }

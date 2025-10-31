@@ -17,6 +17,25 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
+	// Required context env vars
+	taskID := os.Getenv("TASK_ID")
+	if taskID == "" {
+		logger.Error("TASK_ID is required")
+		os.Exit(1)
+	}
+
+	dagID := os.Getenv("DAG_ID")
+	if dagID == "" {
+		logger.Error("DAG_ID is required")
+		os.Exit(1)
+	}
+
+	// Re-instantiate logger with task/dag context
+	logger = slog.New(slog.NewTextHandler(os.Stdout, nil)).With(
+		"task-id", taskID,
+		"dag-id", dagID,
+	)
+
 	mountPath := os.Getenv("MOUNT_PATH")
 	if mountPath == "" {
 		logger.Error("MOUNT_PATH env var is required")
@@ -29,9 +48,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	outDir := os.Getenv("OUT_DIR")
-	if outDir == "" {
-		logger.Error("OUT_DIR env var is required")
+	outDirectory := os.Getenv("OUT_DIRECTORY")
+	if outDirectory == "" {
+		logger.Error("OUT_DIRECTORY env var is required")
 		os.Exit(1)
 	}
 
@@ -61,10 +80,10 @@ func main() {
 	defer storageClient.Close()
 
 	for _, f := range r.File {
-		objectPath := path.Join(outDir, f.Name)
+		objectPath := path.Join(outDirectory, f.Name)
 
 		cleaned := path.Clean("/" + objectPath)
-		safePrefix := path.Clean("/" + outDir)
+		safePrefix := path.Clean("/" + outDirectory)
 		if !strings.HasPrefix(cleaned, safePrefix) && cleaned != safePrefix {
 			logger.Error("illegal file path", "file path", objectPath)
 			os.Exit(1)
@@ -103,12 +122,25 @@ func main() {
 	}
 
 	if deleteZip {
-		if err := os.Remove(zipFilePath); err != nil {
-			logger.Error("Failed to delete zip file", "error", err, "file", zipFilePath)
+		// Instead of removing the directory, ensure the containing directory is empty
+		dirPath := path.Dir(zipFilePath)
+		entries, err := os.ReadDir(dirPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				logger.Error("Failed to read directory contents", "error", err, "dir", dirPath)
+				os.Exit(1)
+			}
 		} else {
-			logger.Info("Deleted zip file", "file", zipFilePath)
+			for _, entry := range entries {
+				entryPath := path.Join(dirPath, entry.Name())
+				if remErr := os.RemoveAll(entryPath); remErr != nil {
+					logger.Error("Failed to remove directory entry", "error", remErr, "path", entryPath)
+					os.Exit(1)
+				}
+			}
+			logger.Info("Emptied directory", "dir", dirPath)
 		}
 	}
 
-	logger.Info("Unzipped and uploaded successfully", "bucket", bucketName, "prefix", outDir)
+	logger.Info("Unzipped and uploaded successfully", "bucket", bucketName, "prefix", outDirectory)
 }

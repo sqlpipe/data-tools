@@ -19,6 +19,47 @@ type bqField struct {
 	Mode string `json:"mode"`
 }
 
+// schemaTransform represents a single column rule provided via SCHEMA_TRANSFORM
+type schemaTransform struct {
+	ExpectedColumnName string `json:"expected-column-name"`
+	Type               string `json:"type"`
+	RenameTo           string `json:"rename-to"`
+}
+
+// normalizeBqType maps common synonyms to BigQuery primitive types we support here
+func normalizeBqType(t string) string {
+	tt := strings.ToUpper(strings.TrimSpace(t))
+	switch tt {
+	case "INT", "INTEGER":
+		return "INTEGER"
+	case "FLOAT", "DOUBLE", "NUMBER", "NUMERIC", "DECIMAL":
+		return "FLOAT"
+	case "BOOL", "BOOLEAN":
+		return "BOOLEAN"
+	case "STRING", "TEXT":
+		return "STRING"
+	default:
+		return tt
+	}
+}
+
+// valueConformsToType validates a non-empty trimmed value against a normalized BQ type
+func valueConformsToType(val string, typeName string) bool {
+	switch normalizeBqType(typeName) {
+	case "INTEGER":
+		return isInteger(val)
+	case "FLOAT":
+		return isFloat(val)
+	case "BOOLEAN":
+		return isBoolean(val)
+	case "STRING":
+		return true
+	default:
+		// Unknown types treated as STRING to avoid unexpected failures
+		return true
+	}
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
@@ -75,6 +116,9 @@ func main() {
 
 	makeColumnNamesSqlFriendly := strings.EqualFold(os.Getenv("MAKE_COLUMN_NAMES_SQL_FRIENDLY"), "true")
 
+	// When true, export a small CSV with just cleaned headers and first 5 rows
+	exportHead := strings.EqualFold(os.Getenv("EXPORT_HEAD"), "true")
+
 	removeValuesEnv := os.Getenv("REMOVE_VALUES")
 	removeValues := strings.Split(removeValuesEnv, ",")
 
@@ -119,23 +163,94 @@ func main() {
 
 	outFileWriter := csv.NewWriter(gcsWriter)
 
+	// Optional head export writer (header + first 5 rows)
+	var headCsvWriter *csv.Writer
+	var headGcsWriter *storage.Writer
+	if exportHead {
+		headObjectPath := outObjectPath + ".head.csv"
+		headGcsWriter = storageClient.Bucket(bucketName).Object(headObjectPath).NewWriter(ctx)
+		headGcsWriter.ContentType = "text/csv"
+		defer func() {
+			if headGcsWriter != nil {
+				if err := headGcsWriter.Close(); err != nil {
+					logger.Error("Failed to close head GCS writer", "error", err)
+					os.Exit(1)
+				}
+			}
+		}()
+		headCsvWriter = csv.NewWriter(headGcsWriter)
+		logger.Info("EXPORT_HEAD enabled; writing head CSV", "object", headObjectPath)
+	}
+
 	originalColumnNames, err := inFileReader.Read()
 	if err != nil {
 		logger.Error("Failed to read infile", "error", err)
 		os.Exit(1)
 	}
 
-	columnNames := originalColumnNames
+	// Optional schema transform
+	schemaTransformEnv := os.Getenv("SCHEMA_TRANSFORM")
+	useTransform := strings.TrimSpace(schemaTransformEnv) != ""
+	columnNames := make([]string, len(originalColumnNames))
+	expectedTypes := make([]string, len(originalColumnNames))
 
-	if makeColumnNamesSqlFriendly {
-		for i := range originalColumnNames {
-			columnNames[i] = makeStringSqlFriendly(originalColumnNames[i])
+	if useTransform {
+		var transforms []schemaTransform
+		if err := json.Unmarshal([]byte(schemaTransformEnv), &transforms); err != nil {
+			logger.Error("Failed to parse SCHEMA_TRANSFORM JSON", "error", err)
+			os.Exit(1)
 		}
+
+		// Build lookup from expected-column-name -> transform
+		transformByExpected := make(map[string]schemaTransform, len(transforms))
+		for _, tr := range transforms {
+			key := strings.TrimSpace(tr.ExpectedColumnName)
+			if key == "" {
+				logger.Error("SCHEMA_TRANSFORM entry missing expected-column-name")
+				os.Exit(1)
+			}
+			transformByExpected[key] = tr
+		}
+
+		// Validate/construct output header and expected types in the CSV header order
+		for i, hdr := range originalColumnNames {
+			tr, ok := transformByExpected[hdr]
+			if !ok {
+				logger.Error("CSV header column not found in SCHEMA_TRANSFORM", "column", hdr)
+				os.Exit(1)
+			}
+			newName := tr.RenameTo
+			if strings.TrimSpace(newName) == "" {
+				newName = hdr
+			}
+			// If MAKE_COLUMN_NAMES_SQL_FRIENDLY is set, apply it to the target names
+			if makeColumnNamesSqlFriendly {
+				newName = makeStringSqlFriendly(newName)
+			}
+			columnNames[i] = newName
+			expectedTypes[i] = normalizeBqType(tr.Type)
+		}
+		logger.Info("Using SCHEMA_TRANSFORM for columns", "columnNames", columnNames)
+	} else {
+		// No transform: optionally make SQL friendly names
+		copy(columnNames, originalColumnNames)
+		if makeColumnNamesSqlFriendly {
+			for i := range originalColumnNames {
+				columnNames[i] = makeStringSqlFriendly(originalColumnNames[i])
+			}
+		}
+		logger.Info("Column names", "columnNames", columnNames)
 	}
 
-	logger.Info("Column names", "columnNames", columnNames)
-
 	outFileWriter.Write(columnNames)
+	if exportHead {
+		headCsvWriter.Write(columnNames)
+		headCsvWriter.Flush()
+		if err := headCsvWriter.Error(); err != nil {
+			logger.Error("Failed to write header to head CSV", "error", err)
+			os.Exit(1)
+		}
+	}
 	outFileWriter.Flush()
 
 	err = outFileWriter.Error()
@@ -146,8 +261,8 @@ func main() {
 
 	removeValuesBool := len(removeValuesMap) > 0
 
-	// Track possible BigQuery types per column while reading
-	// We evaluate against these primitive candidates (no date/time)
+	// Track possible types only when no schema transform provided
+	// We evaluate against primitive candidates (no date/time)
 	type candidate struct {
 		isInt   bool
 		isFloat bool
@@ -155,16 +270,19 @@ func main() {
 	}
 
 	colCandidates := make([]candidate, len(columnNames))
-	for i := range colCandidates {
-		colCandidates[i] = candidate{
-			isInt:   true,
-			isFloat: true,
-			isBool:  true,
+	if !useTransform {
+		for i := range colCandidates {
+			colCandidates[i] = candidate{
+				isInt:   true,
+				isFloat: true,
+				isBool:  true,
+			}
 		}
 	}
 
 	lineNumber := 0
 
+	headRowsWritten := 0
 	for {
 
 		if lineNumber%100000 == 0 {
@@ -182,7 +300,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Remove values and update type candidates in a single pass
+		// Remove values and update type candidates / enforce transform in a single pass
 		for i, v := range rec {
 			if removeValuesBool {
 				if removeValuesMap[v] {
@@ -192,23 +310,34 @@ func main() {
 			}
 			val := strings.TrimSpace(v)
 			if val == "" {
-				// empty values do not eliminate any candidates; continue
+				// empty values are always allowed
 				continue
 			}
-			c := colCandidates[i]
-			if c.isInt && !isInteger(val) {
-				c.isInt = false
+			if useTransform {
+				if !valueConformsToType(val, expectedTypes[i]) {
+					logger.Error("Type validation failed", "line", lineNumber, "column", columnNames[i], "expectedType", expectedTypes[i], "value", val)
+					os.Exit(1)
+				}
+			} else {
+				c := colCandidates[i]
+				if c.isInt && !isInteger(val) {
+					c.isInt = false
+				}
+				if c.isFloat && !isFloat(val) {
+					c.isFloat = false
+				}
+				if c.isBool && !isBoolean(val) {
+					c.isBool = false
+				}
+				colCandidates[i] = c
 			}
-			if c.isFloat && !isFloat(val) {
-				c.isFloat = false
-			}
-			if c.isBool && !isBoolean(val) {
-				c.isBool = false
-			}
-			colCandidates[i] = c
 		}
 
 		outFileWriter.Write(rec)
+		if exportHead && headRowsWritten < 5 {
+			headCsvWriter.Write(rec)
+			headRowsWritten++
+		}
 	}
 
 	outFileWriter.Flush()
@@ -219,19 +348,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Determine final BigQuery types with a reasonable precedence (no date/time)
+	if exportHead {
+		headCsvWriter.Flush()
+		if err := headCsvWriter.Error(); err != nil {
+			logger.Error("Failed to flush head CSV writer", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	// Determine final BigQuery types
 	finalTypes := make([]string, len(columnNames))
-	for i, c := range colCandidates {
-		// Prefer numeric, then bool, else string
-		switch {
-		case c.isInt:
-			finalTypes[i] = "INTEGER"
-		case c.isFloat:
-			finalTypes[i] = "FLOAT"
-		case c.isBool:
-			finalTypes[i] = "BOOLEAN"
-		default:
-			finalTypes[i] = "STRING"
+	if useTransform {
+		copy(finalTypes, expectedTypes)
+	} else {
+		for i, c := range colCandidates {
+			// Prefer numeric, then bool, else string
+			switch {
+			case c.isInt:
+				finalTypes[i] = "INTEGER"
+			case c.isFloat:
+				finalTypes[i] = "FLOAT"
+			case c.isBool:
+				finalTypes[i] = "BOOLEAN"
+			default:
+				finalTypes[i] = "STRING"
+			}
 		}
 	}
 

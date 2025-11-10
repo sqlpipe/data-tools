@@ -51,3 +51,50 @@ func isBoolean(s string) bool {
 		return false
 	}
 }
+
+type bqField struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Mode string `json:"mode"`
+}
+
+// schemaTransform represents a single column rule provided via SCHEMA_TRANSFORM
+type schemaTransform struct {
+	ExpectedColumnName string `json:"expected-column-name"`
+	Type               string `json:"type"`
+	RenameTo           string `json:"rename-to"`
+}
+
+// normalizeBqType maps common synonyms to BigQuery primitive types we support here
+func normalizeBqType(t string) string {
+	tt := strings.ToUpper(strings.TrimSpace(t))
+	switch tt {
+	case "INT", "INTEGER":
+		return "INTEGER"
+	case "FLOAT", "DOUBLE", "NUMBER", "NUMERIC", "DECIMAL":
+		return "FLOAT"
+	case "BOOL", "BOOLEAN":
+		return "BOOLEAN"
+	case "STRING", "TEXT":
+		return "STRING"
+	default:
+		return tt
+	}
+}
+
+// valueConformsToType validates a non-empty trimmed value against a normalized BQ type
+func valueConformsToType(val string, typeName string) bool {
+	switch normalizeBqType(typeName) {
+	case "INTEGER":
+		return isInteger(val)
+	case "FLOAT":
+		return isFloat(val)
+	case "BOOLEAN":
+		return isBoolean(val)
+	case "STRING":
+		return true
+	default:
+		// Unknown types treated as STRING to avoid unexpected failures
+		return true
+	}
+}

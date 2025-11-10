@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -12,53 +13,6 @@ import (
 
 	"cloud.google.com/go/storage"
 )
-
-type bqField struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-	Mode string `json:"mode"`
-}
-
-// schemaTransform represents a single column rule provided via SCHEMA_TRANSFORM
-type schemaTransform struct {
-	ExpectedColumnName string `json:"expected-column-name"`
-	Type               string `json:"type"`
-	RenameTo           string `json:"rename-to"`
-}
-
-// normalizeBqType maps common synonyms to BigQuery primitive types we support here
-func normalizeBqType(t string) string {
-	tt := strings.ToUpper(strings.TrimSpace(t))
-	switch tt {
-	case "INT", "INTEGER":
-		return "INTEGER"
-	case "FLOAT", "DOUBLE", "NUMBER", "NUMERIC", "DECIMAL":
-		return "FLOAT"
-	case "BOOL", "BOOLEAN":
-		return "BOOLEAN"
-	case "STRING", "TEXT":
-		return "STRING"
-	default:
-		return tt
-	}
-}
-
-// valueConformsToType validates a non-empty trimmed value against a normalized BQ type
-func valueConformsToType(val string, typeName string) bool {
-	switch normalizeBqType(typeName) {
-	case "INTEGER":
-		return isInteger(val)
-	case "FLOAT":
-		return isFloat(val)
-	case "BOOLEAN":
-		return isBoolean(val)
-	case "STRING":
-		return true
-	default:
-		// Unknown types treated as STRING to avoid unexpected failures
-		return true
-	}
-}
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -112,14 +66,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	exportNilTransform := strings.EqualFold(os.Getenv("EXPORT_NIL_TRANSFORM"), "true")
+	if exportNilTransform {
+		logger.Info("EXPORT_NIL_TRANSFORM enabled; exporting nil transform")
+	}
+
 	deleteInFile := strings.EqualFold(os.Getenv("DELETE_IN_FILE"), "true")
+	if deleteInFile {
+		logger.Info("DELETE_IN_FILE enabled; deleting infile")
+	}
 
 	makeColumnNamesSqlFriendly := strings.EqualFold(os.Getenv("MAKE_COLUMN_NAMES_SQL_FRIENDLY"), "true")
+	if makeColumnNamesSqlFriendly {
+		logger.Info("MAKE_COLUMN_NAMES_SQL_FRIENDLY enabled; making column names SQL friendly")
+	}
 
 	// When true, export a small CSV with just cleaned headers and first 5 rows
 	exportHead := strings.EqualFold(os.Getenv("EXPORT_HEAD"), "true")
+	if exportHead {
+		logger.Info("EXPORT_HEAD enabled; exporting head")
+	}
 
 	removeValuesEnv := os.Getenv("REMOVE_VALUES")
+	if removeValuesEnv != "" {
+		logger.Info("REMOVE_VALUES env var is set; removing values", "remove-values", removeValuesEnv)
+	}
 	removeValues := strings.Split(removeValuesEnv, ",")
 
 	removeValuesMap := make(map[string]bool)
@@ -130,8 +101,6 @@ func main() {
 		removeValuesMap[value] = true
 	}
 
-	logger.Info("Remove values", "removeValues", removeValues)
-
 	infilePath := fmt.Sprintf("%s/%s", mountPath, inFileName)
 
 	inFile, err := os.Open(infilePath)
@@ -141,9 +110,98 @@ func main() {
 	}
 	defer inFile.Close()
 
-	inFileReader := csv.NewReader(inFile)
+	// We'll read the first line as a raw string when SCHEMA_TRANSFORM is set
+	// to allow substring replacements that may include commas.
+	// After header handling, we will construct a csv.Reader for the remaining rows.
+	bufReader := bufio.NewReader(inFile)
+	rawHeaderLine, err := bufReader.ReadString('\n')
+	if err != nil && err != io.EOF { // allow EOF for single-line files
+		logger.Error("Failed to read infile header line", "error", err)
+		os.Exit(1)
+	}
+	// Trim trailing newlines (support \r\n and \n)
+	rawHeaderLine = strings.TrimRight(rawHeaderLine, "\r\n")
 
-	// Initialize GCS client and writer
+	// Optional schema transform
+	schemaTransformEnv := os.Getenv("SCHEMA_TRANSFORM")
+	useTransform := strings.TrimSpace(schemaTransformEnv) != ""
+	var originalColumnNames []string
+	var columnNames []string
+	var expectedTypes []string
+
+	if useTransform {
+		var transforms []schemaTransform
+		if err := json.Unmarshal([]byte(schemaTransformEnv), &transforms); err != nil {
+			logger.Error("Failed to parse SCHEMA_TRANSFORM JSON", "error", err)
+			os.Exit(1)
+		}
+
+		// Perform substring replacements on the raw header line using the transforms.
+		// Replacement is exact, case-sensitive, and uses rename-to if provided, else expected name.
+		replacedHeader := rawHeaderLine
+		for _, tr := range transforms {
+			expected := strings.TrimSpace(tr.ExpectedColumnName)
+			if expected == "" {
+				logger.Error("SCHEMA_TRANSFORM entry missing expected-column-name")
+				os.Exit(1)
+			}
+			target := strings.TrimSpace(tr.RenameTo)
+			if target == "" {
+				target = expected
+			}
+			replacedHeader = strings.ReplaceAll(replacedHeader, expected, target)
+		}
+
+		// Parse the replaced header using CSV rules to get final header tokens
+		headerReader := csv.NewReader(strings.NewReader(replacedHeader))
+		parsedHeader, err := headerReader.Read()
+		if err != nil {
+			logger.Error("Failed to parse transformed header as CSV", "error", err)
+			os.Exit(1)
+		}
+		originalColumnNames = parsedHeader
+
+		// Validate exact match in number and names (in order) against transforms
+		if len(parsedHeader) != len(transforms) {
+			logger.Error("Header column count does not match SCHEMA_TRANSFORM", "headerCount", len(parsedHeader), "transformCount", len(transforms))
+			os.Exit(1)
+		}
+
+		columnNames = make([]string, len(parsedHeader))
+		expectedTypes = make([]string, len(parsedHeader))
+		for i, hdr := range parsedHeader {
+			desiredName := strings.TrimSpace(transforms[i].RenameTo)
+			if desiredName == "" {
+				desiredName = strings.TrimSpace(transforms[i].ExpectedColumnName)
+			}
+			if !strings.EqualFold(hdr, desiredName) {
+				logger.Error("Header column does not match SCHEMA_TRANSFORM at position", "index", i, "header", hdr, "expected", desiredName)
+				os.Exit(1)
+			}
+			columnNames[i] = desiredName
+			expectedTypes[i] = normalizeBqType(transforms[i].Type)
+		}
+		logger.Info("Using SCHEMA_TRANSFORM for columns", "column-names", columnNames)
+	} else {
+		// No transform: parse header normally then optionally make SQL friendly names
+		headerReader := csv.NewReader(strings.NewReader(rawHeaderLine))
+		parsedHeader, err := headerReader.Read()
+		if err != nil {
+			logger.Error("Failed to parse header as CSV", "error", err)
+			os.Exit(1)
+		}
+		originalColumnNames = parsedHeader
+		columnNames = make([]string, len(parsedHeader))
+		copy(columnNames, parsedHeader)
+		if makeColumnNamesSqlFriendly {
+			for i := range columnNames {
+				columnNames[i] = makeStringSqlFriendly(columnNames[i])
+			}
+		}
+		logger.Info("Column names", "columnNames", columnNames)
+	}
+
+	// Initialize context, GCS client and writers AFTER header/transform is finalized
 	ctx := context.Background()
 	storageClient, err := storage.NewClient(ctx)
 	if err != nil {
@@ -180,66 +238,6 @@ func main() {
 		}()
 		headCsvWriter = csv.NewWriter(headGcsWriter)
 		logger.Info("EXPORT_HEAD enabled; writing head CSV", "object", headObjectPath)
-	}
-
-	originalColumnNames, err := inFileReader.Read()
-	if err != nil {
-		logger.Error("Failed to read infile", "error", err)
-		os.Exit(1)
-	}
-
-	// Optional schema transform
-	schemaTransformEnv := os.Getenv("SCHEMA_TRANSFORM")
-	useTransform := strings.TrimSpace(schemaTransformEnv) != ""
-	columnNames := make([]string, len(originalColumnNames))
-	expectedTypes := make([]string, len(originalColumnNames))
-
-	if useTransform {
-		var transforms []schemaTransform
-		if err := json.Unmarshal([]byte(schemaTransformEnv), &transforms); err != nil {
-			logger.Error("Failed to parse SCHEMA_TRANSFORM JSON", "error", err)
-			os.Exit(1)
-		}
-
-		// Build lookup from expected-column-name -> transform
-		transformByExpected := make(map[string]schemaTransform, len(transforms))
-		for _, tr := range transforms {
-			key := strings.TrimSpace(tr.ExpectedColumnName)
-			if key == "" {
-				logger.Error("SCHEMA_TRANSFORM entry missing expected-column-name")
-				os.Exit(1)
-			}
-			transformByExpected[key] = tr
-		}
-
-		// Validate/construct output header and expected types in the CSV header order
-		for i, hdr := range originalColumnNames {
-			tr, ok := transformByExpected[hdr]
-			if !ok {
-				logger.Error("CSV header column not found in SCHEMA_TRANSFORM", "column", hdr)
-				os.Exit(1)
-			}
-			newName := tr.RenameTo
-			if strings.TrimSpace(newName) == "" {
-				newName = hdr
-			}
-			// If MAKE_COLUMN_NAMES_SQL_FRIENDLY is set, apply it to the target names
-			if makeColumnNamesSqlFriendly {
-				newName = makeStringSqlFriendly(newName)
-			}
-			columnNames[i] = newName
-			expectedTypes[i] = normalizeBqType(tr.Type)
-		}
-		logger.Info("Using SCHEMA_TRANSFORM for columns", "columnNames", columnNames)
-	} else {
-		// No transform: optionally make SQL friendly names
-		copy(columnNames, originalColumnNames)
-		if makeColumnNamesSqlFriendly {
-			for i := range originalColumnNames {
-				columnNames[i] = makeStringSqlFriendly(originalColumnNames[i])
-			}
-		}
-		logger.Info("Column names", "columnNames", columnNames)
 	}
 
 	outFileWriter.Write(columnNames)
@@ -283,6 +281,9 @@ func main() {
 	lineNumber := 0
 
 	headRowsWritten := 0
+	// Create csv reader for the remaining rows starting after the header line we consumed
+	inFileReader := csv.NewReader(bufReader)
+
 	for {
 
 		if lineNumber%100000 == 0 {
@@ -403,6 +404,60 @@ func main() {
 	if err := schemaWriter.Close(); err != nil {
 		logger.Error("Failed to close schema writer", "error", err)
 		os.Exit(1)
+	}
+
+	// Optionally export a nil transform JSON next to the schema JSON
+	if exportNilTransform {
+		// Map BQ primitive types to transform types (lowercase)
+		mapBqToTransformType := func(bqType string) string {
+			switch strings.ToUpper(strings.TrimSpace(bqType)) {
+			case "INTEGER", "FLOAT", "NUMERIC", "DECIMAL", "NUMBER", "DOUBLE":
+				return "number"
+			case "BOOLEAN", "BOOL":
+				return "boolean"
+			default:
+				return "string"
+			}
+		}
+
+		// Build transforms using original headers as expected names and current columnNames as rename targets
+		transforms := make([]schemaTransform, 0, len(columnNames))
+		for i := range columnNames {
+			transforms = append(transforms, schemaTransform{
+				ExpectedColumnName: originalColumnNames[i],
+				Type:               mapBqToTransformType(finalTypes[i]),
+				RenameTo:           columnNames[i],
+			})
+		}
+
+		transformBytes, err := json.MarshalIndent(transforms, "", "  ")
+		if err != nil {
+			logger.Error("Failed to marshal nil transform JSON", "error", err)
+			os.Exit(1)
+		}
+
+		// Derive destination object path: same directory as schemaObjectPath
+		transformObjectPath := func() string {
+			idx := strings.LastIndex(schemaObjectPath, "/")
+			if idx == -1 {
+				return "nil-transform.json"
+			}
+			return schemaObjectPath[:idx+1] + "nil-transform.json"
+		}()
+
+		transformWriter := storageClient.Bucket(bucketName).Object(transformObjectPath).NewWriter(ctx)
+		transformWriter.ContentType = "application/json"
+		if _, err := transformWriter.Write(transformBytes); err != nil {
+			logger.Error("Failed to write nil transform to GCS", "error", err)
+			_ = transformWriter.Close()
+			os.Exit(1)
+		}
+		if err := transformWriter.Close(); err != nil {
+			logger.Error("Failed to close nil transform writer", "error", err)
+			os.Exit(1)
+		}
+
+		logger.Info("Nil transform written", "bucket", bucketName, "object", transformObjectPath)
 	}
 
 	logger.Info("CSV and schema written", "bucket", bucketName, "csvObject", outObjectPath, "schemaObject", schemaObjectPath)

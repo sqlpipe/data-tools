@@ -15,7 +15,7 @@ download_job_spec = {
         "template": {
             "containers": [
                 {
-                    "image": sqlpipe/cloud-run-csv-cleaner:latest,
+                    "image": sqlpipe/cloud-run-csv-cleaner:3,
                     "resources": {
                         "limits": {
                             "cpu": "1",

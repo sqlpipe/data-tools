@@ -121,7 +121,10 @@ overrides = {
                 },
                 {
                     "name": "SCHEMA_TRANSFORM",
-                    "value": "",
+                    "value": [
+                      {"expected-column-name": "SOURCE_REF:Publication Source", "type": "string", "rename-to": "publication_source"},
+                      {"expected-column-name": "SUPP_INFO_BREAKS:Supplemental information and breaks", "type": "string", "rename-to": "supplemental_information_and_breaks"},
+                    ]
                 },
                 {
                     "name": "EXPORT_HEAD",

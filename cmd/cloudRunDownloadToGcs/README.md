@@ -8,7 +8,7 @@ Downloads a file from a source URL to a path on a mounted filesystem. Designed t
 
 ## Environment variables
 
-- MOUNT_PATH (required): Absolute path to the mounted writable directory inside the container.
+- MOUNT_PATH (optional): Absolute path to the mounted writable directory inside the container. Default is `/gcs`.
 - LANDING_FILE (required): Relative file path (under MOUNT_PATH) where the downloaded file will be written.
 - SOURCE_URL (required): HTTP(S) URL to download.
 - TASK_ID (required): Task identifier used for structured logging context.

@@ -15,7 +15,7 @@ unzip_job_spec = {
         "template": {
             "containers": [
                 {
-                    "image": UNZIP_IMAGE_WITH_TAG,
+                    "image": "sqlpipe/cloud-run-csv-cleaner:2",
                     "resources": {
                         "limits": {
                             "cpu": "1",

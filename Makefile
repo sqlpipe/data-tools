@@ -33,7 +33,7 @@ docker/push/cloudRunUnzipInGcs/dev:
 .PHONY: docker/push/cloudRunUnzipInGcs/prod
 docker/push/cloudRunUnzipInGcs/prod:
 	GOOS=linux GOARCH=amd64 go build -ldflags="-s" -o ./bin/linux_amd64/cloudRunUnzipInGcs ./cmd/cloudRunUnzipInGcs
-	version=2; \
+	version=3; \
 		docker build --platform=linux/amd64 -t sqlpipe/cloud-run-unzip-in-gcs:$$version -f ./cmd/cloudRunUnzipInGcs/Dockerfile . && \
 		docker push sqlpipe/cloud-run-unzip-in-gcs:$$version
 
@@ -51,7 +51,7 @@ docker/push/cloudRunCsvCleaner/dev:
 .PHONY: docker/push/cloudRunCsvCleaner/prod
 docker/push/cloudRunCsvCleaner/prod:
 	GOOS=linux GOARCH=amd64 go build -ldflags="-s" -o ./bin/linux_amd64/cloudRunCsvCleaner ./cmd/cloudRunCsvCleaner
-	version=2; \
+	version=3; \
 		docker build --platform=linux/amd64 -t sqlpipe/cloud-run-csv-cleaner:$$version -f ./cmd/cloudRunCsvCleaner/Dockerfile . && \
 		docker push sqlpipe/cloud-run-csv-cleaner:$$version
 

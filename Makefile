@@ -15,7 +15,7 @@ docker/push/cloudRunDownloadToGcs/dev:
 docker/push/cloudRunDownloadToGcs/prod:
 	GOOS=linux GOARCH=amd64 go build -ldflags="-s" -o ./bin/linux_amd64/cloudRunDownloadToGcs ./cmd/cloudRunDownloadToGcs
 	
-	version=1; \
+	version=2; \
 		docker build --platform=linux/amd64 -t sqlpipe/cloud-run-download-to-gcs:$$version -f ./cmd/cloudRunDownloadToGcs/Dockerfile . && \
 		docker push sqlpipe/cloud-run-download-to-gcs:$$version
 
@@ -33,7 +33,7 @@ docker/push/cloudRunUnzipInGcs/dev:
 .PHONY: docker/push/cloudRunUnzipInGcs/prod
 docker/push/cloudRunUnzipInGcs/prod:
 	GOOS=linux GOARCH=amd64 go build -ldflags="-s" -o ./bin/linux_amd64/cloudRunUnzipInGcs ./cmd/cloudRunUnzipInGcs
-	version=1; \
+	version=2; \
 		docker build --platform=linux/amd64 -t sqlpipe/cloud-run-unzip-in-gcs:$$version -f ./cmd/cloudRunUnzipInGcs/Dockerfile . && \
 		docker push sqlpipe/cloud-run-unzip-in-gcs:$$version
 
@@ -51,7 +51,7 @@ docker/push/cloudRunCsvCleaner/dev:
 .PHONY: docker/push/cloudRunCsvCleaner/prod
 docker/push/cloudRunCsvCleaner/prod:
 	GOOS=linux GOARCH=amd64 go build -ldflags="-s" -o ./bin/linux_amd64/cloudRunCsvCleaner ./cmd/cloudRunCsvCleaner
-	version=1; \
+	version=2; \
 		docker build --platform=linux/amd64 -t sqlpipe/cloud-run-csv-cleaner:$$version -f ./cmd/cloudRunCsvCleaner/Dockerfile . && \
 		docker push sqlpipe/cloud-run-csv-cleaner:$$version
 

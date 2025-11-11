@@ -15,7 +15,7 @@ docker/push/cloudRunDownloadToGcs/dev:
 docker/push/cloudRunDownloadToGcs/prod:
 	GOOS=linux GOARCH=amd64 go build -ldflags="-s" -o ./bin/linux_amd64/cloudRunDownloadToGcs ./cmd/cloudRunDownloadToGcs
 	
-	version=2; \
+	version=3; \
 		docker build --platform=linux/amd64 -t sqlpipe/cloud-run-download-to-gcs:$$version -f ./cmd/cloudRunDownloadToGcs/Dockerfile . && \
 		docker push sqlpipe/cloud-run-download-to-gcs:$$version
 

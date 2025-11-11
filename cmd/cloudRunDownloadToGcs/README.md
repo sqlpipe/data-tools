@@ -81,6 +81,35 @@ create_download_job_task = CloudRunCreateJobOperator(
     job_name=DOWNLOAD_JOB,
     job=download_job_spec,
 )
+
+overrides = {
+    "container_overrides": [
+        {
+            "env": [
+                {
+                    "name": "LANDING_FILE",
+                    "value": "where-to-put-the-file-in-gcs",
+                },
+                {
+                    "name": "SOURCE_URL",
+                    "value": "url-to-download.com",
+                },
+                {
+                    "name": "TASK_ID",
+                    "value": "name-you-want-the-task-to-have",
+                },
+            ]
+        }
+    ]
+}
+
+execute_download_job_task = CloudRunExecuteJobOperator(
+    task_id=execute_download_job_task_id,
+    project_id=PROJECT_ID,
+    region=REGION,
+    job_name=DOWNLOAD_JOB,
+    overrides=overrides,
+)
 ```
 
 ## Environment variables

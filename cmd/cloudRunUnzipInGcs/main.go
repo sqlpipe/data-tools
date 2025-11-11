@@ -43,8 +43,8 @@ func main() {
 	// MOUNT_PATH: Base directory path where the ZIP file is mounted (e.g., Cloud Run volume mount)
 	mountPath := os.Getenv("MOUNT_PATH")
 	if mountPath == "" {
-		logger.Error("MOUNT_PATH env var is required")
-		os.Exit(1)
+		mountPath = "/gcs"
+		logger.Info("Mount path is not set, using default /gcs")
 	}
 
 	// IN_FILE: Filename (not full path) of the ZIP file relative to MOUNT_PATH

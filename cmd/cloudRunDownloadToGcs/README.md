@@ -6,7 +6,7 @@ Downloads a file from a source URL to a path on a mounted filesystem. Designed t
 
 I recommend creating a job in Airflow, instead of the console. It's not too hard. Here's an example pattern that checks if a download job exists inside Cloud Run. If it does, it updates it to use the latest job spec. If not, it creates it:
 
-```
+```python
 download_job_spec = {
     "labels": {
         "optional-labels-to-track": "how-much-stuff-costs"

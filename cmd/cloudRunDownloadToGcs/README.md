@@ -1,6 +1,6 @@
 # cloudRunDownloadToGcs
 
-Downloads a file from a source URL to a path on a mounted filesystem. Designed for containerized runs where a writable volume is provided and paths are specified via environment variables.
+Downloads a file from a source URL to a path on a mounted filesystem. Designed to be used within GCP Cloud Run Jobs, and triggered by Airflow.
 
 ## Entrypoint
 

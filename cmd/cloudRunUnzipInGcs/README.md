@@ -25,7 +25,7 @@ unzip_job_spec = {
                     "volume_mounts": [
                         {
                             "name": "gcs-storage",
-                            "mount_path": MOUNT_PATH,
+                            "mount_path": "/gcs",
                         }
                     ],
                     "env": [

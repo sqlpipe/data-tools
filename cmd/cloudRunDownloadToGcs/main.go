@@ -21,8 +21,8 @@ func main() {
 	// This is where the downloaded file will be saved
 	mountPath := os.Getenv("MOUNT_PATH")
 	if mountPath == "" {
-		logger.Error("Mount path is required")
-		os.Exit(1)
+		mountPath = "/gcs"
+		logger.Info("Mount path is not set, using default /gcs")
 	}
 
 	// LANDING_FILE: Filename (can include subdirectories) where the downloaded file will be saved
